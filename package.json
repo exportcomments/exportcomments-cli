@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
-    "exportcomments": "dist/cli.js"
+    "exportcomments": "dist/cli.js",
+    "exportcomments-mcp": "dist/mcp.js"
   },
   "files": [
     "dist",
@@ -28,6 +29,8 @@
     "scraper",
     "cli",
     "ai-tools",
+    "mcp",
+    "model-context-protocol",
     "instagram",
     "youtube",
     "tiktok",
@@ -48,6 +51,7 @@
     "url": "https://github.com/exportcomments/exportcomments-cli/issues"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "commander": "^12.1.0"
   },
   "devDependencies": {

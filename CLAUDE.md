@@ -11,9 +11,10 @@ exportcomments export https://www.instagram.com/p/ABC123/ --wait
 
 ## Architecture
 
-- `src/cli.ts` - Main CLI entry point with all commands (Commander.js)
+- `src/cli.ts` - CLI entry point with all commands (Commander.js)
+- `src/mcp.ts` - MCP server entry point (6 tools for AI agents)
 - `src/client.ts` - HTTP API client wrapping ExportComments v3 endpoints
-- `src/platforms.ts` - Platform metadata (40+ platforms with URL patterns, options, examples)
+- `src/platforms.ts` - Platform metadata (33 platforms with URL patterns, options, examples)
 - `src/types.ts` - TypeScript type definitions
 
 ## API

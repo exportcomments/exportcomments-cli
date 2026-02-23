@@ -1,8 +1,8 @@
-# ExportComments CLI
+# ExportComments CLI & MCP Server
 
-Command-line tool for the [ExportComments.com](https://exportcomments.com) API. Export comments and reviews from 40+ social media and review platforms.
+Command-line tool and [MCP server](https://modelcontextprotocol.io) for the [ExportComments.com](https://exportcomments.com) API. Export comments and reviews from 40+ social media and review platforms.
 
-**Designed for AI agent usage** - all commands output structured JSON for easy parsing by LLMs and automation tools.
+**Designed for AI agent usage** - includes an MCP server for native AI integration (Claude, Cursor, Windsurf) and a CLI with structured JSON output.
 
 ## Installation
 
@@ -161,15 +161,54 @@ All commands output JSON with a consistent envelope:
 | `done` | Job completed successfully |
 | `error` | Job failed with an error |
 
-## AI Agent Usage
+## MCP Server (for AI Agents)
 
-This CLI is specifically designed for use by AI agents (Claude, GPT, etc.):
+The MCP server gives AI assistants (Claude, Cursor, Windsurf, etc.) native access to ExportComments tools.
 
-1. **Structured JSON output** - Every command returns parseable JSON with `ok` boolean
-2. **Self-documenting** - `platforms` command provides full metadata for URL construction
-3. **Polling built-in** - `--wait` flag handles polling logic internally
-4. **Non-zero exit codes** - Failed commands exit with code 1
-5. **Progress on stderr** - Polling progress goes to stderr, keeping stdout clean for JSON
+### Setup with Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "exportcomments": {
+      "command": "npx",
+      "args": ["-y", "exportcomments-cli"],
+      "env": {
+        "EXPORTCOMMENTS_API_TOKEN": "your-token-here"
+      }
+    }
+  }
+}
+```
+
+### Setup with Claude Code
+
+```bash
+claude mcp add exportcomments -- npx -y exportcomments-cli
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `export_comments` | Create an export job for a URL (supports `wait` param) |
+| `check_export` | Check job status by GUID |
+| `list_exports` | List all export jobs with pagination |
+| `download_export` | Download raw JSON data for a completed job |
+| `detect_platform` | Identify platform from a URL and show available options |
+| `list_platforms` | List all 33+ supported platforms |
+
+### Run Directly
+
+```bash
+EXPORTCOMMENTS_API_TOKEN="your-token" exportcomments-mcp
+```
+
+## CLI Usage
+
+The CLI outputs structured JSON for scripting and automation.
 
 ### Example AI workflow
 
