@@ -1,0 +1,61 @@
+{
+  "name": "exportcomments-cli",
+  "version": "1.0.0",
+  "description": "CLI tool for ExportComments.com API - export comments and reviews from 40+ platforms. Optimized for AI agent usage.",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "exportcomments": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "CLAUDE.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "exportcomments",
+    "comments",
+    "reviews",
+    "social-media",
+    "export",
+    "scraper",
+    "cli",
+    "ai-tools",
+    "instagram",
+    "youtube",
+    "tiktok",
+    "facebook",
+    "twitter",
+    "reddit",
+    "amazon",
+    "trustpilot"
+  ],
+  "author": "ExportComments.com",
+  "license": "MIT",
+  "homepage": "https://exportcomments.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/exportcomments/exportcomments-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/exportcomments/exportcomments-cli/issues"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

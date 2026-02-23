@@ -1,0 +1,7 @@
+src/
+tsconfig.json
+.env
+.env.example
+.gitignore
+*.tgz
+.DS_Store
