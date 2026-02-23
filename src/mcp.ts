@@ -9,6 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { ExportCommentsClient } from './client.js';
 import { PLATFORMS, detectPlatform } from './platforms.js';
+import { waitForJobRealtime } from './realtime.js';
 
 const TOKEN = process.env.EXPORTCOMMENTS_API_TOKEN;
 
@@ -52,6 +53,7 @@ Set wait=true to poll until completion (up to 10 minutes).`,
     advanced: z.boolean().optional().describe('Enable advanced export features'),
     facebook_ads: z.boolean().optional().describe('Include Facebook ads data'),
     wait: z.boolean().optional().describe('Wait for export to complete before returning (polls every 5s, timeout 10min)'),
+    realtime: z.boolean().optional().describe('Use WebSocket for real-time updates instead of polling (implies wait=true)'),
   },
   async (params) => {
     const client = getClient();
@@ -80,8 +82,22 @@ Set wait=true to poll until completion (up to 10 minutes).`,
       return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: true };
     }
 
-    if (params.wait && result.data) {
-      const waitResult = await client.waitForJob(result.data.guid);
+    const shouldWait = params.wait || params.realtime;
+
+    if (shouldWait && result.data) {
+      let waitResult;
+
+      if (params.realtime && TOKEN) {
+        waitResult = await waitForJobRealtime(TOKEN, result.data.guid);
+
+        // Fall back to polling if WebSocket fails
+        if (!waitResult.ok && (waitResult.error_code === 'WS_CONNECTION_TIMEOUT' || waitResult.error_code === 'WS_AUTH_FAILED' || waitResult.error_code === 'WS_ERROR')) {
+          waitResult = await client.waitForJob(result.data.guid);
+        }
+      } else {
+        waitResult = await client.waitForJob(result.data.guid);
+      }
+
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(waitResult, null, 2) }],
         isError: !waitResult.ok,
@@ -103,12 +119,27 @@ Set wait=true to poll until the job reaches a terminal state.`,
   {
     guid: z.string().describe('The job GUID returned by export_comments'),
     wait: z.boolean().optional().describe('Wait for export to complete before returning'),
+    realtime: z.boolean().optional().describe('Use WebSocket for real-time updates instead of polling (implies wait=true)'),
   },
   async (params) => {
     const client = getClient();
 
-    if (params.wait) {
-      const result = await client.waitForJob(params.guid);
+    const shouldWait = params.wait || params.realtime;
+
+    if (shouldWait) {
+      let result;
+
+      if (params.realtime && TOKEN) {
+        result = await waitForJobRealtime(TOKEN, params.guid);
+
+        // Fall back to polling if WebSocket fails
+        if (!result.ok && (result.error_code === 'WS_CONNECTION_TIMEOUT' || result.error_code === 'WS_AUTH_FAILED' || result.error_code === 'WS_ERROR')) {
+          result = await client.waitForJob(params.guid);
+        }
+      } else {
+        result = await client.waitForJob(params.guid);
+      }
+
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
         isError: !result.ok,

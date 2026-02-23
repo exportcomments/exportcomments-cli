@@ -7,7 +7,8 @@
 import { Command } from 'commander';
 import { ExportCommentsClient } from './client.js';
 import { PLATFORMS, detectPlatform } from './platforms.js';
-import type { ExportOptions, JobResponse, CLIOutput } from './types.js';
+import type { ExportOptions, JobResponse, CLIOutput, SocketEvent } from './types.js';
+import { waitForJobRealtime } from './realtime.js';
 
 // ── Helpers ──
 
@@ -106,6 +107,7 @@ program
   .option('--wait', 'Wait for export to complete (polls every 5s, timeout 10min)')
   .option('--wait-interval <ms>', 'Polling interval in milliseconds (default: 5000)', parseInt)
   .option('--wait-timeout <ms>', 'Maximum wait time in milliseconds (default: 600000)', parseInt)
+  .option('--realtime', 'Use WebSocket for real-time updates instead of polling (implies --wait)')
   .option('--download', 'Download the file after export completes (implies --wait)')
   .option('--download-json', 'Download the raw JSON data after export completes (implies --wait)')
   .action(async (url: string, opts) => {
@@ -148,17 +150,44 @@ program
 
     const guid = result.data!.guid;
 
-    // If --wait or --download, poll until done
-    if (opts.wait || opts.download || opts.downloadJson) {
-      const waitResult = await client.waitForJob(guid, {
-        intervalMs: opts.waitInterval,
-        timeoutMs: opts.waitTimeout,
-        onPoll: (job) => {
-          process.stderr.write(
-            `\r[polling] status=${job.status} exported=${job.total_exported ?? 0}/${job.total ?? '?'}  `
-          );
-        },
-      });
+    // If --wait, --realtime, or --download, wait until done
+    if (opts.wait || opts.realtime || opts.download || opts.downloadJson) {
+      let waitResult: CLIOutput<JobResponse>;
+
+      if (opts.realtime) {
+        waitResult = await waitForJobRealtime(getToken(program.opts()), guid, {
+          timeoutMs: opts.waitTimeout,
+          onEvent: (_event: string, data: SocketEvent) => {
+            process.stderr.write(
+              `\r[realtime] status=${data.status} exported=${data.current ?? 0}/${data.total ?? '?'}  `
+            );
+          },
+        });
+
+        // Fall back to polling if WebSocket fails to connect
+        if (!waitResult.ok && (waitResult.error_code === 'WS_CONNECTION_TIMEOUT' || waitResult.error_code === 'WS_AUTH_FAILED' || waitResult.error_code === 'WS_ERROR')) {
+          process.stderr.write(`\n[realtime] WebSocket failed (${waitResult.error}), falling back to polling...\n`);
+          waitResult = await client.waitForJob(guid, {
+            intervalMs: opts.waitInterval,
+            timeoutMs: opts.waitTimeout,
+            onPoll: (job) => {
+              process.stderr.write(
+                `\r[polling] status=${job.status} exported=${job.total_exported ?? 0}/${job.total ?? '?'}  `
+              );
+            },
+          });
+        }
+      } else {
+        waitResult = await client.waitForJob(guid, {
+          intervalMs: opts.waitInterval,
+          timeoutMs: opts.waitTimeout,
+          onPoll: (job) => {
+            process.stderr.write(
+              `\r[polling] status=${job.status} exported=${job.total_exported ?? 0}/${job.total ?? '?'}  `
+            );
+          },
+        });
+      }
       process.stderr.write('\n');
 
       if (!waitResult.ok) {
@@ -209,20 +238,48 @@ program
   .option('--wait', 'Wait for export to complete')
   .option('--wait-interval <ms>', 'Polling interval in milliseconds (default: 5000)', parseInt)
   .option('--wait-timeout <ms>', 'Maximum wait time in milliseconds (default: 600000)', parseInt)
+  .option('--realtime', 'Use WebSocket for real-time updates instead of polling (implies --wait)')
   .action(async (guid: string, opts) => {
     const globalOpts = program.opts();
     const client = getClient(globalOpts);
 
-    if (opts.wait) {
-      const result = await client.waitForJob(guid, {
-        intervalMs: opts.waitInterval,
-        timeoutMs: opts.waitTimeout,
-        onPoll: (job) => {
-          process.stderr.write(
-            `\r[polling] status=${job.status} exported=${job.total_exported ?? 0}/${job.total ?? '?'}  `
-          );
-        },
-      });
+    if (opts.wait || opts.realtime) {
+      let result: CLIOutput<JobResponse>;
+
+      if (opts.realtime) {
+        result = await waitForJobRealtime(getToken(globalOpts), guid, {
+          timeoutMs: opts.waitTimeout,
+          onEvent: (_event: string, data: SocketEvent) => {
+            process.stderr.write(
+              `\r[realtime] status=${data.status} exported=${data.current ?? 0}/${data.total ?? '?'}  `
+            );
+          },
+        });
+
+        // Fall back to polling if WebSocket fails to connect
+        if (!result.ok && (result.error_code === 'WS_CONNECTION_TIMEOUT' || result.error_code === 'WS_AUTH_FAILED' || result.error_code === 'WS_ERROR')) {
+          process.stderr.write(`\n[realtime] WebSocket failed (${result.error}), falling back to polling...\n`);
+          result = await client.waitForJob(guid, {
+            intervalMs: opts.waitInterval,
+            timeoutMs: opts.waitTimeout,
+            onPoll: (job) => {
+              process.stderr.write(
+                `\r[polling] status=${job.status} exported=${job.total_exported ?? 0}/${job.total ?? '?'}  `
+              );
+            },
+          });
+        }
+      } else {
+        result = await client.waitForJob(guid, {
+          intervalMs: opts.waitInterval,
+          timeoutMs: opts.waitTimeout,
+          onPoll: (job) => {
+            process.stderr.write(
+              `\r[polling] status=${job.status} exported=${job.total_exported ?? 0}/${job.total ?? '?'}  `
+            );
+          },
+        });
+      }
       process.stderr.write('\n');
       exitWithResult(result);
     } else {

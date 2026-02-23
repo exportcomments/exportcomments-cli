@@ -53,6 +53,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
+    "centrifuge": "^5.5.3",
     "commander": "^12.1.0"
   },
   "devDependencies": {

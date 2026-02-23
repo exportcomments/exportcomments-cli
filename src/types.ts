@@ -70,6 +70,17 @@ export interface CLIOutput<T = unknown> {
   detail?: string;
 }
 
+export interface SocketEvent {
+  version: string;
+  event: string;
+  guid: string;
+  status: string;
+  url: string | null;
+  details: Record<string, unknown> | null;
+  current?: number;
+  total?: number;
+}
+
 export interface PlatformInfo {
   id: string;
   name: string;
