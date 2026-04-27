@@ -1,6 +1,6 @@
 {
   "name": "exportcomments-cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "CLI tool for ExportComments.com API - export comments and reviews from 40+ platforms. Optimized for AI agent usage.",
   "type": "module",
   "main": "dist/cli.js",
