@@ -151,7 +151,10 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       issuer,
-      authorization_endpoint: `${issuer}/oauth/authorize`,
+      // User-facing authorize endpoint lives on the dashboard subdomain
+      // (the consent UI is a Vue page in the dashboard Nuxt app). Different
+      // host from the issuer is allowed by RFC 8414.
+      authorization_endpoint: 'https://app.exportcomments.com/oauth/authorize',
       token_endpoint: `${issuer}/oauth/token`,
       registration_endpoint: `${issuer}/oauth/register`,
       scopes_supported: ['read', 'write'],
