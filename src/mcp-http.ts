@@ -43,11 +43,15 @@ function extractToken(req: http.IncomingMessage): string | null {
 }
 
 function sendUnauthorized(res: http.ServerResponse): void {
-  // Per MCP spec, surfacing `resource_metadata` / `as_uri` lets compatible
-  // clients (Claude Desktop, Cursor) auto-trigger the OAuth flow.
+  // Per MCP spec (and RFC 9728), surfacing `resource_metadata` pointing at
+  // *our own* /.well-known/oauth-protected-resource lets compatible clients
+  // (Claude Custom Connector, Cursor, Windsurf) auto-discover the
+  // authorization server and complete the OAuth flow without manual setup.
+  // `as_uri` is the older shorthand; both are emitted for compatibility.
+  const protectedResourceUrl = 'https://mcp.exportcomments.com/.well-known/oauth-protected-resource';
   res.writeHead(401, {
     'Content-Type': 'application/json',
-    'WWW-Authenticate': `Bearer realm="exportcomments", as_uri="${OAUTH_DISCOVERY_URL}", resource_metadata="${OAUTH_DISCOVERY_URL}"`,
+    'WWW-Authenticate': `Bearer realm="exportcomments", as_uri="${OAUTH_DISCOVERY_URL}", resource_metadata="${protectedResourceUrl}"`,
   });
   res.end(JSON.stringify({
     jsonrpc: '2.0',
@@ -135,6 +139,40 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, service: 'exportcomments-mcp', version: '1.0.0' }));
+    return;
+  }
+
+  // OAuth discovery endpoints (served from this resource origin so MCP
+  // clients can complete the connector setup without an extra lookup).
+  // We mirror the AS metadata locally and also expose Protected Resource
+  // Metadata (RFC 9728) for clients that follow the newer MCP auth spec.
+  if (req.method === 'GET' && req.url === '/.well-known/oauth-authorization-server') {
+    const issuer = new URL(OAUTH_DISCOVERY_URL).origin;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      issuer,
+      authorization_endpoint: `${issuer}/oauth/authorize`,
+      token_endpoint: `${issuer}/oauth/token`,
+      scopes_supported: ['read', 'write'],
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'],
+      service_documentation: 'https://docs.exportcomments.com/cli/mcp',
+    }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/.well-known/oauth-protected-resource') {
+    const issuer = new URL(OAUTH_DISCOVERY_URL).origin;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      resource: 'https://mcp.exportcomments.com/mcp',
+      authorization_servers: [issuer],
+      scopes_supported: ['read', 'write'],
+      bearer_methods_supported: ['header'],
+      resource_documentation: 'https://docs.exportcomments.com/cli/mcp',
+    }));
     return;
   }
 
