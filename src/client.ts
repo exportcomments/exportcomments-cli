@@ -8,7 +8,13 @@ import type {
 } from './types.js';
 
 const BASE_URL = 'https://exportcomments.com/api/v3';
+const V1_BASE_URL = 'https://exportcomments.com/api/v1';
 const USER_AGENT = 'exportcomments-cli/1.0.0';
+
+/** A JWT has three base64url-encoded segments separated by dots (header.payload.signature). */
+function looksLikeJwt(token: string): boolean {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
+}
 
 export class ExportCommentsClient {
   private token: string;
@@ -20,11 +26,54 @@ export class ExportCommentsClient {
   }
 
   private get headers(): Record<string, string> {
+    const auth: Record<string, string> = looksLikeJwt(this.token)
+      ? { Authorization: `Bearer ${this.token}` }
+      : { 'X-AUTH-TOKEN': this.token };
     return {
-      'X-AUTH-TOKEN': this.token,
+      ...auth,
       'Content-Type': 'application/json',
       'User-Agent': USER_AGENT,
     };
+  }
+
+  /** Make a request against /api/v1/* (most user/webhook/schedule endpoints). */
+  private async v1Request<T>(
+    method: string,
+    path: string,
+    body?: unknown
+  ): Promise<CLIOutput<T>> {
+    const v1BaseUrl = this.baseUrl.replace('/v3', '/v1');
+    const url = `${v1BaseUrl}${path}`;
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: this.headers,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await res.text();
+      let data: T | ApiError;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        if (!res.ok) {
+          return { ok: false, error: `HTTP ${res.status}: ${res.statusText}`, detail: text.slice(0, 500) };
+        }
+        return { ok: true, data: text as unknown as T };
+      }
+      if (!res.ok) {
+        const err = data as ApiError;
+        return {
+          ok: false,
+          error: err.error ?? `HTTP ${res.status}`,
+          error_code: err.error_code,
+          detail: err.detail,
+        };
+      }
+      return { ok: true, data: data as T };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message };
+    }
   }
 
   private async request<T>(
@@ -202,6 +251,90 @@ export class ExportCommentsClient {
       const message = err instanceof Error ? err.message : String(err);
       return { ok: false, error: message };
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // /api/v1/* — user account, webhooks, scheduled exports
+  // ───────────────────────────────────────────────────────────────────────
+
+  /** Authenticated user's profile (email, tier, account info). */
+  async getProfile(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/user/profile');
+  }
+
+  /** Current usage quota: daily/monthly counts vs. allowances. */
+  async getQuota(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/user/quota');
+  }
+
+  /** Plan tier limits (concurrent exports, max comments, rate limits, etc.). */
+  async getLimits(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/user/limits');
+  }
+
+  /** List all webhooks for the authenticated account. */
+  async listWebhooks(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/webhooks');
+  }
+
+  /**
+   * @param event subscription event name (e.g. "export.completed")
+   * @param url   POST target — must respond 2xx within 10s
+   */
+  async createWebhook(event: string, url: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', '/webhooks', { event, url });
+  }
+
+  async updateWebhook(uuid: string, fields: { event?: string; url?: string }): Promise<CLIOutput<unknown>> {
+    return this.v1Request('PATCH', `/webhooks/${uuid}`, fields);
+  }
+
+  async deleteWebhook(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('DELETE', `/webhooks/${uuid}`);
+  }
+
+  async toggleWebhook(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/webhooks/${uuid}/toggle`);
+  }
+
+  /** Sends a test event payload to a webhook URL for connectivity verification. */
+  async testWebhook(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/webhooks/${uuid}/test`);
+  }
+
+  // ── Scheduled exports ──
+
+  async listSchedules(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/schedules');
+  }
+
+  async createSchedule(payload: {
+    url: string;
+    cron?: string;
+    frequency?: string;
+    options?: Record<string, unknown>;
+  }): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', '/schedules', payload);
+  }
+
+  async updateSchedule(uuid: string, fields: Record<string, unknown>): Promise<CLIOutput<unknown>> {
+    return this.v1Request('PATCH', `/schedules/${uuid}`, fields);
+  }
+
+  async deleteSchedule(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('DELETE', `/schedules/${uuid}`);
+  }
+
+  async runSchedule(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/schedules/${uuid}/run`);
+  }
+
+  async pauseSchedule(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/schedules/${uuid}/pause`);
+  }
+
+  async resumeSchedule(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/schedules/${uuid}/resume`);
   }
 
   /** Ping the API to check connectivity */

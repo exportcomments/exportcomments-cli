@@ -217,4 +217,312 @@ Use this before export_comments to understand what options are available.`,
       };
     }
   );
+
+  // ── User account ──
+
+  server.tool(
+    'get_my_profile',
+    'Get the authenticated account profile: email, plan tier, account ID, registration date.',
+    {},
+    async () => {
+      const result = await clientFor(getToken).getProfile();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'get_my_quota',
+    'Current usage vs. allowance for this account: requests today/this month, comments exported, concurrent exports in flight.',
+    {},
+    async () => {
+      const result = await clientFor(getToken).getQuota();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'get_my_limits',
+    'Plan tier limits (Premium / Business): daily request cap, rate limit, concurrent exports, max comments per export, webhook count.',
+    {},
+    async () => {
+      const result = await clientFor(getToken).getLimits();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  // ── Random comment picker (giveaways) ──
+
+  server.tool(
+    'pick_random_winners',
+    `Pick N random winners from a completed export. Downloads the export's
+JSON payload, deduplicates by commenter username, optionally filters by
+@-mention, hashtag, or substring, then picks N winners uniformly.
+
+Returns the winner list with usernames, comment text, and permalinks
+(suitable for FTC-compliant public verification).`,
+    {
+      guid: z.string().describe('Completed export GUID (status=done)'),
+      count: z.number().min(1).max(100).default(1).describe('Number of winners (default 1)'),
+      require_mention: z.string().optional().describe('Only consider comments containing this @-handle (e.g. "@brand")'),
+      require_hashtag: z.string().optional().describe('Only consider comments containing this #hashtag'),
+      require_text: z.string().optional().describe('Substring the comment must contain (case-insensitive)'),
+      dedupe_by_user: z.boolean().optional().default(true).describe('Limit each commenter to one entry (default true)'),
+    },
+    async (params) => {
+      const client = clientFor(getToken);
+      const dl = await client.downloadJson(params.guid);
+      if (!dl.ok) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify(dl, null, 2) }], isError: true };
+      }
+
+      // Most ExportComments JSON exports are an array of comment objects;
+      // some platforms wrap in {comments: [...]}. Tolerate both.
+      const raw = dl.data as unknown;
+      let comments: Array<Record<string, unknown>> =
+        Array.isArray(raw) ? raw as Array<Record<string, unknown>>
+        : (raw && typeof raw === 'object' && Array.isArray((raw as Record<string, unknown>).comments))
+          ? (raw as { comments: Array<Record<string, unknown>> }).comments
+          : [];
+
+      const totalIn = comments.length;
+
+      if (params.require_mention) {
+        const needle = params.require_mention.toLowerCase();
+        comments = comments.filter((c) => String(c.comment ?? c.text ?? '').toLowerCase().includes(needle));
+      }
+      if (params.require_hashtag) {
+        const tag = params.require_hashtag.startsWith('#') ? params.require_hashtag : '#' + params.require_hashtag;
+        const needle = tag.toLowerCase();
+        comments = comments.filter((c) => String(c.comment ?? c.text ?? '').toLowerCase().includes(needle));
+      }
+      if (params.require_text) {
+        const needle = params.require_text.toLowerCase();
+        comments = comments.filter((c) => String(c.comment ?? c.text ?? '').toLowerCase().includes(needle));
+      }
+      if (params.dedupe_by_user !== false) {
+        const seen = new Set<string>();
+        comments = comments.filter((c) => {
+          const u = String(c.username ?? c.user ?? c.user_name ?? '');
+          if (u === '' || seen.has(u)) return false;
+          seen.add(u);
+          return true;
+        });
+      }
+
+      if (comments.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            ok: false,
+            error: 'No comments matched the filters.',
+            total_in_export: totalIn,
+          }, null, 2) }],
+          isError: true,
+        };
+      }
+
+      // Fisher-Yates shuffle then take first N
+      const pool = [...comments];
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+      }
+      const winners = pool.slice(0, Math.min(params.count, pool.length));
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          ok: true,
+          data: {
+            total_in_export: totalIn,
+            after_filters: comments.length,
+            winners_requested: params.count,
+            winners: winners.map((c) => ({
+              username: c.username ?? c.user ?? c.user_name,
+              comment: c.comment ?? c.text,
+              permalink: c.permalink ?? c.url ?? null,
+              created_at: c.created_at ?? c.timestamp ?? null,
+            })),
+          },
+        }, null, 2) }],
+      };
+    }
+  );
+
+  // ── Webhooks ──
+
+  server.tool(
+    'list_webhooks',
+    'List the authenticated account\'s webhook subscriptions (event, URL, enabled state, last delivery status).',
+    {},
+    async () => {
+      const result = await clientFor(getToken).listWebhooks();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'create_webhook',
+    `Subscribe a URL to a webhook event. Common events: "export.completed",
+"export.failed", "schedule.run". The URL will receive POSTs with a JSON
+body (signed via X-Webhook-Signature for verification).`,
+    {
+      event: z.string().describe('Event name (e.g. "export.completed")'),
+      url: z.string().url().describe('HTTPS endpoint that handles the event'),
+    },
+    async (params) => {
+      const result = await clientFor(getToken).createWebhook(params.event, params.url);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'update_webhook',
+    'Change the event or target URL of an existing webhook subscription.',
+    {
+      uuid: z.string().describe('Webhook UUID from list_webhooks'),
+      event: z.string().optional().describe('New event name'),
+      url: z.string().url().optional().describe('New target URL'),
+    },
+    async (params) => {
+      const fields: { event?: string; url?: string } = {};
+      if (params.event) fields.event = params.event;
+      if (params.url) fields.url = params.url;
+      const result = await clientFor(getToken).updateWebhook(params.uuid, fields);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'delete_webhook',
+    'Permanently remove a webhook subscription. Use toggle_webhook to disable without deleting.',
+    { uuid: z.string().describe('Webhook UUID from list_webhooks') },
+    async (params) => {
+      const result = await clientFor(getToken).deleteWebhook(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'toggle_webhook',
+    'Enable or disable a webhook (30s cooldown between toggles).',
+    { uuid: z.string().describe('Webhook UUID from list_webhooks') },
+    async (params) => {
+      const result = await clientFor(getToken).toggleWebhook(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'test_webhook',
+    'Fire a test event at the configured URL to verify delivery. Returns the receiving server\'s response.',
+    { uuid: z.string().describe('Webhook UUID from list_webhooks') },
+    async (params) => {
+      const result = await clientFor(getToken).testWebhook(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  // ── Scheduled exports ──
+
+  server.tool(
+    'list_schedules',
+    'List scheduled (recurring) export jobs for this account.',
+    {},
+    async () => {
+      const result = await clientFor(getToken).listSchedules();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'create_schedule',
+    `Create a recurring export. Either pass a standard cron expression
+("0 9 * * 1" = Mondays 09:00 UTC) or a frequency name ("daily",
+"weekly", "monthly"). Same options as export_comments — replies, limit,
+vpn, cookies, etc. — in an options object.`,
+    {
+      url: z.string().describe('URL to export on each run'),
+      cron: z.string().optional().describe('Cron expression in UTC (e.g. "0 9 * * 1")'),
+      frequency: z.enum(['hourly', 'daily', 'weekly', 'monthly']).optional().describe('Friendly frequency name'),
+      options: z.record(z.string(), z.unknown()).optional().describe('Same options as export_comments'),
+    },
+    async (params) => {
+      if (!params.cron && !params.frequency) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            ok: false,
+            error: 'Either cron or frequency is required.',
+          }, null, 2) }],
+          isError: true,
+        };
+      }
+      const result = await clientFor(getToken).createSchedule({
+        url: params.url,
+        cron: params.cron,
+        frequency: params.frequency,
+        options: params.options,
+      });
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'update_schedule',
+    'Edit a scheduled export\'s URL, cron, frequency, or options.',
+    {
+      uuid: z.string().describe('Schedule UUID from list_schedules'),
+      url: z.string().optional(),
+      cron: z.string().optional(),
+      frequency: z.enum(['hourly', 'daily', 'weekly', 'monthly']).optional(),
+      options: z.record(z.string(), z.unknown()).optional(),
+    },
+    async (params) => {
+      const fields: Record<string, unknown> = {};
+      if (params.url !== undefined) fields.url = params.url;
+      if (params.cron !== undefined) fields.cron = params.cron;
+      if (params.frequency !== undefined) fields.frequency = params.frequency;
+      if (params.options !== undefined) fields.options = params.options;
+      const result = await clientFor(getToken).updateSchedule(params.uuid, fields);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'delete_schedule',
+    'Permanently remove a scheduled export. Use pause_schedule to suspend without deleting.',
+    { uuid: z.string().describe('Schedule UUID from list_schedules') },
+    async (params) => {
+      const result = await clientFor(getToken).deleteSchedule(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'run_schedule',
+    'Trigger a scheduled export to run immediately (in addition to its normal cadence).',
+    { uuid: z.string().describe('Schedule UUID from list_schedules') },
+    async (params) => {
+      const result = await clientFor(getToken).runSchedule(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'pause_schedule',
+    'Suspend a scheduled export. No new runs until resume_schedule is called.',
+    { uuid: z.string().describe('Schedule UUID from list_schedules') },
+    async (params) => {
+      const result = await clientFor(getToken).pauseSchedule(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
+
+  server.tool(
+    'resume_schedule',
+    'Resume a paused scheduled export.',
+    { uuid: z.string().describe('Schedule UUID from list_schedules') },
+    async (params) => {
+      const result = await clientFor(getToken).resumeSchedule(params.uuid);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }], isError: !result.ok };
+    }
+  );
 }
