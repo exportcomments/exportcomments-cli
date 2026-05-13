@@ -164,7 +164,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && req.url === '/.well-known/oauth-protected-resource') {
+  // RFC 9728 §3.1 — metadata is served at the resource's well-known URL
+  // suffix. Most clients fetch /.well-known/oauth-protected-resource at the
+  // origin; Claude.ai's Custom Connector appends the resource path, so we
+  // accept both /.well-known/oauth-protected-resource and
+  // /.well-known/oauth-protected-resource/mcp (and any other path under it)
+  // with the same document.
+  if (req.method === 'GET' && req.url?.startsWith('/.well-known/oauth-protected-resource')) {
     const issuer = new URL(OAUTH_DISCOVERY_URL).origin;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
