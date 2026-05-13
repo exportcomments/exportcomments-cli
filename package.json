@@ -7,7 +7,8 @@
   "bin": {
     "exportcomments": "dist/cli.js",
     "exportcomments-cli": "dist/cli.js",
-    "exportcomments-mcp": "dist/mcp.js"
+    "exportcomments-mcp": "dist/mcp.js",
+    "exportcomments-mcp-http": "dist/mcp-http.js"
   },
   "files": [
     "dist",
