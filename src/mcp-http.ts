@@ -153,6 +153,7 @@ const server = http.createServer(async (req, res) => {
       issuer,
       authorization_endpoint: `${issuer}/oauth/authorize`,
       token_endpoint: `${issuer}/oauth/token`,
+      registration_endpoint: `${issuer}/oauth/register`,
       scopes_supported: ['read', 'write'],
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
