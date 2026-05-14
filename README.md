@@ -174,7 +174,7 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "exportcomments": {
       "command": "npx",
-      "args": ["-y", "exportcomments-cli"],
+      "args": ["-y", "--package", "exportcomments-cli", "exportcomments-mcp"],
       "env": {
         "EXPORTCOMMENTS_API_TOKEN": "your-token-here"
       }
@@ -183,10 +183,15 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
+> The package ships two binaries — `exportcomments-cli` (CLI) and
+> `exportcomments-mcp` (MCP stdio server). The `--package … exportcomments-mcp`
+> form tells `npx` to install `exportcomments-cli` but execute the MCP
+> binary inside it, so the process stays alive and serves MCP over stdio.
+
 ### Setup with Claude Code
 
 ```bash
-claude mcp add exportcomments -- npx -y exportcomments-cli
+claude mcp add exportcomments -- npx -y --package exportcomments-cli exportcomments-mcp
 ```
 
 ### Available MCP Tools
