@@ -124,13 +124,84 @@ export class ExportCommentsClient {
     }
   }
 
+  /**
+   * Cached lookup of whether the configured token's user has /api/v3
+   * (developer-API) access. Premium and Business return true; Free and
+   * Personal return false. Result is memoised for the lifetime of the
+   * client instance — within an MCP session that's one call total.
+   *
+   * For non-JWT tokens (legacy X-AUTH-TOKEN) we shortcut to true, because
+   * an X-AUTH-TOKEN is only ever issued to API-eligible accounts.
+   */
+  private apiAccessCache: boolean | null = null;
+  private async hasApiAccess(): Promise<boolean> {
+    if (this.apiAccessCache !== null) return this.apiAccessCache;
+    if (!looksLikeJwt(this.token)) {
+      this.apiAccessCache = true;
+      return true;
+    }
+    try {
+      const url = `${this.baseUrl.replace('/v3', '/v1')}/api-usage`;
+      const res = await fetch(url, { headers: this.headers });
+      if (!res.ok) { this.apiAccessCache = false; return false; }
+      const data = (await res.json()) as { has_access?: boolean };
+      this.apiAccessCache = Boolean(data.has_access);
+      return this.apiAccessCache;
+    } catch {
+      this.apiAccessCache = false;
+      return false;
+    }
+  }
+
+  /**
+   * Some /api/v1 list endpoints wrap each item as `{comment: {…}}` while /v3
+   * returns the comment fields flat. Normalise so callers always see flat shape.
+   */
+  private unwrapV1Item(item: unknown): JobResponse {
+    if (item && typeof item === 'object' && 'comment' in item && (item as Record<string, unknown>)['comment'] && typeof (item as Record<string, unknown>)['comment'] === 'object') {
+      return (item as { comment: JobResponse }).comment;
+    }
+    return item as JobResponse;
+  }
+
   /** Create a new export job */
   async createJob(req: CreateJobRequest): Promise<CLIOutput<JobResponse>> {
+    if (!(await this.hasApiAccess())) {
+      // Free / Personal — route through the user-API. POST /api/v1/job
+      // replies HTTP 400 + {error: "export.unfinished", guid} when the job
+      // is queued; unwrap that into a successful "queueing" response.
+      const v1BaseUrl = this.baseUrl.replace('/v3', '/v1');
+      try {
+        const res = await fetch(`${v1BaseUrl}/job`, {
+          method: 'POST',
+          headers: this.headers,
+          body: JSON.stringify(req),
+        });
+        const text = await res.text();
+        let data: Record<string, unknown> | null = null;
+        try { data = JSON.parse(text); } catch { /* non-JSON */ }
+        if (data && typeof data === 'object' && data['error'] === 'export.unfinished' && typeof data['guid'] === 'string') {
+          return { ok: true, data: { guid: data['guid'] as string, status: 'queueing' } as JobResponse };
+        }
+        if (res.ok && data) return { ok: true, data: data as unknown as JobResponse };
+        return {
+          ok: false,
+          error: (data?.['error'] as string | undefined) ?? `HTTP ${res.status}`,
+          error_code: data?.['error_code'] as string | undefined,
+          detail: data?.['detail'] as string | undefined,
+        };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
     return this.request<JobResponse>('POST', '/job', req);
   }
 
   /** Check the status of an export job */
   async getJob(guid: string): Promise<CLIOutput<JobResponse>> {
+    if (!(await this.hasApiAccess())) {
+      return this.v1Request<JobResponse>('GET', `/job/${guid}`);
+    }
     return this.request<JobResponse>('GET', `/job/${guid}`);
   }
 
@@ -139,10 +210,27 @@ export class ExportCommentsClient {
     page = 1,
     limit = 20
   ): Promise<CLIOutput<JobResponse[]>> {
+    if (!(await this.hasApiAccess())) {
+      const res = await this.v1Request<{ items?: unknown[] }>(
+        'GET',
+        `/jobs?page=${page}&limit=${limit}`
+      );
+      if (!res.ok) return { ok: false, error: res.error, error_code: res.error_code, detail: res.detail };
+      const items = (res.data?.items ?? []).map((i) => this.unwrapV1Item(i));
+      return { ok: true, data: items };
+    }
     return this.request<JobResponse[]>(
       'GET',
       `/jobs?page=${page}&limit=${limit}`
     );
+  }
+
+  /** Stop a queued or in-progress export */
+  async stopJob(guid: string): Promise<CLIOutput<unknown>> {
+    if (!(await this.hasApiAccess())) {
+      return this.v1Request('POST', `/jobs/${guid}/stop`);
+    }
+    return this.request('PATCH', `/job/${guid}/stop`);
   }
 
   /** Download a file from a direct URL, saving it to disk */
@@ -217,6 +305,12 @@ export class ExportCommentsClient {
   /**
    * Download the raw JSON data for a completed job.
    * First fetches job status to get the JSON URL, then downloads.
+   *
+   * NOTE: JSON delivery is a developer-API feature — only exports created
+   * through /api/v3/* carry a `json_url`. Free / Personal users hit /v1/*
+   * (which only emits Excel/CSV), so jobs they create never have a json_url.
+   * In that case we surface a clear upgrade hint instead of the generic
+   * "no JSON URL" error.
    */
   async downloadJson(guid: string): Promise<CLIOutput<unknown>> {
     const jobResult = await this.getJob(guid);
@@ -226,6 +320,14 @@ export class ExportCommentsClient {
     const jsonUrl = job.json_url;
 
     if (!jsonUrl) {
+      if (!(await this.hasApiAccess())) {
+        return {
+          ok: false,
+          error: 'JSON export requires a Premium or Business plan.',
+          error_code: 'plan_upgrade_required',
+          detail: 'This job was created on the user API which only emits Excel/CSV. Upgrade at https://exportcomments.com/pricing to enable JSON output.',
+        };
+      }
       return {
         ok: false,
         error: `No JSON URL available for job ${guid}`,
