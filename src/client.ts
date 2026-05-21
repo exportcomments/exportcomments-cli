@@ -7,8 +7,9 @@ import type {
   CLIOutput,
 } from './types.js';
 
-const BASE_URL = 'https://exportcomments.com/api/v3';
-const V1_BASE_URL = 'https://exportcomments.com/api/v1';
+const API_BASE = process.env.EXPORTCOMMENTS_API_BASE?.replace(/\/+$/, '') ?? 'https://exportcomments.com';
+const BASE_URL = `${API_BASE}/api/v3`;
+const V1_BASE_URL = `${API_BASE}/api/v1`;
 const USER_AGENT = 'exportcomments-cli/1.0.0';
 
 /** A JWT has three base64url-encoded segments separated by dots (header.payload.signature). */
@@ -280,26 +281,40 @@ export class ExportCommentsClient {
   /**
    * @param event subscription event name (e.g. "export.completed")
    * @param url   POST target — must respond 2xx within 10s
+   *
+   * The API-Platform webhook resource expects `events: string[]` and a
+   * `signingSecret` for HMAC verification. We accept a single event in the
+   * MCP-facing shape and expand it here so the MCP tool stays single-arg.
    */
   async createWebhook(event: string, url: string): Promise<CLIOutput<unknown>> {
-    return this.v1Request('POST', '/webhooks', { event, url });
+    const { randomBytes } = await import('node:crypto');
+    return this.v1Request('POST', '/webhooks', {
+      events: [event],
+      url,
+      signingSecret: randomBytes(32).toString('hex'),
+    });
   }
 
   async updateWebhook(uuid: string, fields: { event?: string; url?: string }): Promise<CLIOutput<unknown>> {
-    return this.v1Request('PATCH', `/webhooks/${uuid}`, fields);
+    const payload: { events?: string[]; url?: string } = {};
+    if (fields.event) payload.events = [fields.event];
+    if (fields.url) payload.url = fields.url;
+    return this.v1Request('PATCH', `/webhooks/${uuid}`, payload);
   }
 
   async deleteWebhook(uuid: string): Promise<CLIOutput<unknown>> {
     return this.v1Request('DELETE', `/webhooks/${uuid}`);
   }
 
+  /** Toggle uses PATCH (API-Platform exposes it that way). */
   async toggleWebhook(uuid: string): Promise<CLIOutput<unknown>> {
-    return this.v1Request('POST', `/webhooks/${uuid}/toggle`);
+    return this.v1Request('PATCH', `/webhooks/${uuid}/toggle`);
   }
 
-  /** Sends a test event payload to a webhook URL for connectivity verification. */
+  /** Sends a test event payload. The main /webhooks bundle has no test
+   * endpoint; the Zapier-integration route does, and accepts the same UUID. */
   async testWebhook(uuid: string): Promise<CLIOutput<unknown>> {
-    return this.v1Request('POST', `/webhooks/${uuid}/test`);
+    return this.v1Request('POST', `/zapier/webhooks/${uuid}/test`);
   }
 
   // ── Scheduled exports ──
@@ -318,7 +333,7 @@ export class ExportCommentsClient {
   }
 
   async updateSchedule(uuid: string, fields: Record<string, unknown>): Promise<CLIOutput<unknown>> {
-    return this.v1Request('PATCH', `/schedules/${uuid}`, fields);
+    return this.v1Request('PUT', `/schedules/${uuid}`, fields);
   }
 
   async deleteSchedule(uuid: string): Promise<CLIOutput<unknown>> {
@@ -326,7 +341,7 @@ export class ExportCommentsClient {
   }
 
   async runSchedule(uuid: string): Promise<CLIOutput<unknown>> {
-    return this.v1Request('POST', `/schedules/${uuid}/run`);
+    return this.v1Request('POST', `/schedules/${uuid}/run-now`);
   }
 
   async pauseSchedule(uuid: string): Promise<CLIOutput<unknown>> {
