@@ -1,0 +1,39 @@
+name: Deploy hosted MCP
+
+# Auto-deploys the hosted mcp.exportcomments.com instance whenever main
+# moves. The deploy key on prod is locked to the deploy.sh command via
+# command="..." in /root/.ssh/authorized_keys, so a leaked key can only
+# trigger a redeploy from the latest origin/main — no shell, no port
+# forwarding, no other commands.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger deploy.sh on prod via restricted SSH key
+        env:
+          SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+          SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # The key is restricted to running deploy.sh via the command="" directive
+          # in authorized_keys, so the SSH "command" we send here is ignored — the
+          # server runs deploy.sh regardless.
+          ssh -i ~/.ssh/deploy -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new "$SSH_USER@$SSH_HOST" deploy
