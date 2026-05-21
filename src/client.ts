@@ -17,17 +17,6 @@ function looksLikeJwt(token: string): boolean {
   return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
 }
 
-/**
- * Some /api/v1 list endpoints wrap each item as `{comment: {…}}` while /api/v3
- * returns the comment fields flat. Normalise so callers always see flat shape.
- */
-function unwrapV1Item(item: unknown): JobResponse {
-  if (item && typeof item === 'object' && 'comment' in item && (item as Record<string, unknown>)['comment'] && typeof (item as Record<string, unknown>)['comment'] === 'object') {
-    return (item as { comment: JobResponse }).comment;
-  }
-  return item as JobResponse;
-}
-
 export class ExportCommentsClient {
   private token: string;
   private baseUrl: string;
@@ -135,57 +124,13 @@ export class ExportCommentsClient {
     }
   }
 
-  /**
-   * Returns true when the configured token is an OAuth-issued JWT. OAuth users
-   * are routed through the same `/api/v1/*` endpoints the web dashboard uses
-   * (per-user rate-limits, no `X-AUTH-TOKEN` required). Legacy API tokens stay
-   * on `/api/v3/*` (developer API, per-token rate-limits).
-   */
-  private get useUserApi(): boolean {
-    return looksLikeJwt(this.token);
-  }
-
   /** Create a new export job */
   async createJob(req: CreateJobRequest): Promise<CLIOutput<JobResponse>> {
-    if (this.useUserApi) {
-      // The user-API returns HTTP 400 with `{error: "export.unfinished", guid}`
-      // when a new export is accepted and queued (it's not an actual error — the
-      // guid is the handle to poll with). Read the body ourselves so we can
-      // unwrap that case into an `ok: true` response with the guid.
-      const v1BaseUrl = this.baseUrl.replace('/v3', '/v1');
-      try {
-        const res = await fetch(`${v1BaseUrl}/job`, {
-          method: 'POST',
-          headers: this.headers,
-          body: JSON.stringify(req),
-        });
-        const text = await res.text();
-        let data: Record<string, unknown> | null = null;
-        try { data = JSON.parse(text); } catch { /* non-JSON */ }
-        if (data && typeof data === 'object' && data['error'] === 'export.unfinished' && typeof data['guid'] === 'string') {
-          return { ok: true, data: { guid: data['guid'] as string, status: 'queueing' } as JobResponse };
-        }
-        if (res.ok && data) {
-          return { ok: true, data: data as unknown as JobResponse };
-        }
-        return {
-          ok: false,
-          error: (data?.['error'] as string | undefined) ?? `HTTP ${res.status}`,
-          error_code: data?.['error_code'] as string | undefined,
-          detail: data?.['detail'] as string | undefined,
-        };
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    }
     return this.request<JobResponse>('POST', '/job', req);
   }
 
   /** Check the status of an export job */
   async getJob(guid: string): Promise<CLIOutput<JobResponse>> {
-    if (this.useUserApi) {
-      return this.v1Request<JobResponse>('GET', `/job/${guid}`);
-    }
     return this.request<JobResponse>('GET', `/job/${guid}`);
   }
 
@@ -194,28 +139,10 @@ export class ExportCommentsClient {
     page = 1,
     limit = 20
   ): Promise<CLIOutput<JobResponse[]>> {
-    if (this.useUserApi) {
-      // /api/v1/jobs returns {metadata, items:[{comment:{…}}]} — unwrap.
-      const res = await this.v1Request<{ items?: unknown[] }>(
-        'GET',
-        `/jobs?page=${page}&limit=${limit}`
-      );
-      if (!res.ok) return { ok: false, error: res.error, error_code: res.error_code, detail: res.detail };
-      const items = (res.data?.items ?? []).map(unwrapV1Item);
-      return { ok: true, data: items };
-    }
     return this.request<JobResponse[]>(
       'GET',
       `/jobs?page=${page}&limit=${limit}`
     );
-  }
-
-  /** Stop a queued or in-progress export */
-  async stopJob(guid: string): Promise<CLIOutput<unknown>> {
-    if (this.useUserApi) {
-      return this.v1Request('POST', `/jobs/${guid}/stop`);
-    }
-    return this.request('PATCH', `/job/${guid}/stop`);
   }
 
   /** Download a file from a direct URL, saving it to disk */
