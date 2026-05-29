@@ -356,6 +356,53 @@ export class ExportCommentsClient {
     }
   }
 
+  /**
+   * Fetch a completed export's rows inline for analysis, via
+   * GET /api/v3/job/{guid}/data?format={csv|json}. This v3 endpoint is open to
+   * ALL tiers (server-side ANALYSIS_ACCESS): Free/Personal get CSV (plain text,
+   * ideal for an LLM to read), Premium/Business may also request JSON.
+   *
+   * CSV comes back as a raw string in `data`; JSON as the parsed object. Exports
+   * above the server's inline ceiling reply 413 with a file URL, which we surface
+   * in `detail` so the caller can fall back to the file download.
+   */
+  async getExportData(guid: string, format: 'csv' | 'json' = 'csv'): Promise<CLIOutput<unknown>> {
+    // The data endpoint lives on /v3 but is tier-open, so call it directly —
+    // do NOT route Free/Personal to /v1 the way create/list/status do.
+    const url = `${this.baseUrl}/job/${guid}/data?format=${format}`;
+    try {
+      const res = await fetch(url, { headers: this.headers });
+      const text = await res.text();
+      if (!res.ok) {
+        let parsed: Record<string, unknown> | null = null;
+        try { parsed = JSON.parse(text); } catch { /* error bodies are JSON; ignore parse failures */ }
+        const fileUrl = (parsed?.['download_url'] as string | undefined) ?? (parsed?.['json_url'] as string | undefined);
+        return {
+          ok: false,
+          error: (parsed?.['error'] as string | undefined) ?? `HTTP ${res.status}: ${res.statusText}`,
+          error_code: parsed?.['error_code'] as string | undefined,
+          detail: fileUrl ?? (parsed?.['detail'] as string | undefined),
+        };
+      }
+      return { ok: true, data: format === 'csv' ? text : JSON.parse(text) };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message };
+    }
+  }
+
+  /**
+   * Tier-aware export-data fetch used by the `download_export` MCP tool.
+   * Default format follows the plan: JSON for Premium/Business (delivered as the
+   * full, uncapped json_url file) and CSV for Free/Personal (inline, LLM-readable).
+   * An explicit `format` overrides the default; requesting JSON without API access
+   * returns a clear upgrade hint (handled inside downloadJson).
+   */
+  async downloadData(guid: string, format?: 'csv' | 'json'): Promise<CLIOutput<unknown>> {
+    const chosen = format ?? ((await this.hasApiAccess()) ? 'json' : 'csv');
+    return chosen === 'json' ? this.downloadJson(guid) : this.getExportData(guid, 'csv');
+  }
+
   // ───────────────────────────────────────────────────────────────────────
   // /api/v1/* — user account, webhooks, scheduled exports
   // ───────────────────────────────────────────────────────────────────────

@@ -201,7 +201,7 @@ claude mcp add exportcomments -- npx -y --package exportcomments-cli exportcomme
 | `export_comments` | Create an export job for a URL (supports `wait` param) |
 | `check_export` | Check job status by GUID |
 | `list_exports` | List all export jobs with pagination |
-| `download_export` | Download raw JSON data for a completed job |
+| `download_export` | Download a completed export's data — JSON for Premium/Business, CSV for Free/Personal (pass `format` to override) |
 | `detect_platform` | Identify platform from a URL and show available options |
 | `list_platforms` | List all 33+ supported platforms |
 

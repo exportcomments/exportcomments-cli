@@ -159,17 +159,25 @@ Set wait=true to poll until the job reaches a terminal state.`,
   // ── Tool: download_export ──
   server.tool(
     'download_export',
-    `Download the raw JSON data for a completed export job.
-Returns the actual exported comments/reviews as structured JSON.
-The job must have status "done" for this to work.`,
+    `Download a completed export's data for analysis (status must be "done").
+Returns JSON for Premium/Business accounts and CSV for Free/Personal accounts —
+CSV is plain text, ideal for reading and analyzing the comments directly.
+The format defaults to the best option for your plan; pass "format" to override
+(JSON requires a Premium or Business plan).`,
     {
       guid: z.string().describe('The job GUID to download data for'),
+      format: z.enum(['json', 'csv']).optional().describe('Output format. Default: JSON for Premium/Business, CSV for Free/Personal. JSON requires a paid plan.'),
     },
     async (params) => {
       const client = clientFor(getToken);
-      const result = await client.downloadJson(params.guid);
+      const result = await client.downloadData(params.guid, params.format);
+      // CSV comes back as a raw string — hand it to the model verbatim so it can
+      // read the rows directly. JSON payloads and errors stay structured.
+      const text = result.ok && typeof result.data === 'string'
+        ? result.data
+        : JSON.stringify(result, null, 2);
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text' as const, text }],
         isError: !result.ok,
       };
     }
