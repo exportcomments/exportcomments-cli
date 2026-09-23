@@ -17,6 +17,21 @@ function looksLikeJwt(token: string): boolean {
   return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token);
 }
 
+/**
+ * A 401 from the API means the credential is dead (expired, revoked, signed
+ * out), not that the export failed. Tag it so the MCP tool layer can tell the
+ * user to reconnect instead of showing a bare "Authentication Failed".
+ */
+function unauthorizedOutput(): CLIOutput<never> {
+  return {
+    ok: false,
+    error: 'Authentication failed — your ExportComments connection is no longer valid.',
+    error_code: 'unauthorized',
+    detail: 'Reconnect the ExportComments connector (or re-run the OAuth flow) to authorize again. '
+      + 'If you are using an API token, get a fresh one at https://app.exportcomments.com/user/api',
+  };
+}
+
 export class ExportCommentsClient {
   private token: string;
   private baseUrl: string;
@@ -62,6 +77,7 @@ export class ExportCommentsClient {
         return { ok: true, data: text as unknown as T };
       }
       if (!res.ok) {
+        if (res.status === 401) return unauthorizedOutput();
         const err = data as ApiError;
         return {
           ok: false,
@@ -108,6 +124,7 @@ export class ExportCommentsClient {
       }
 
       if (!res.ok) {
+        if (res.status === 401) return unauthorizedOutput();
         const err = data as ApiError;
         return {
           ok: false,
@@ -127,8 +144,9 @@ export class ExportCommentsClient {
   /**
    * Cached lookup of whether the configured token's user has /api/v3
    * (developer-API) access. Premium and Business return true; Free and
-   * Personal return false. Result is memoised for the lifetime of the
-   * client instance — within an MCP session that's one call total.
+   * Personal return false. Only a definitive answer (2xx, or 403 = plan has
+   * no API access) is memoised for the lifetime of the client instance —
+   * within an MCP session that's one call total.
    *
    * For non-JWT tokens (legacy X-AUTH-TOKEN) we shortcut to true, because
    * an X-AUTH-TOKEN is only ever issued to API-eligible accounts.
@@ -143,12 +161,19 @@ export class ExportCommentsClient {
     try {
       const url = `${this.baseUrl.replace('/v3', '/v1')}/api-usage`;
       const res = await fetch(url, { headers: this.headers });
-      if (!res.ok) { this.apiAccessCache = false; return false; }
-      const data = (await res.json()) as { has_access?: boolean };
-      this.apiAccessCache = Boolean(data.has_access);
-      return this.apiAccessCache;
+      if (res.ok) {
+        const data = (await res.json()) as { has_access?: boolean };
+        this.apiAccessCache = Boolean(data.has_access);
+        return this.apiAccessCache;
+      }
+      // 403 is a real answer: this plan has no developer-API access. Cache it.
+      if (res.status === 403) { this.apiAccessCache = false; return false; }
+      // 401 / 429 / 5xx / anything else is NOT an answer about the plan — it is
+      // a broken token or a hiccup. Fall back to the user API for this one call
+      // but do NOT memoise, or a single blip would strand a Premium account on
+      // the Free routing for the rest of a long-lived stdio session.
+      return false;
     } catch {
-      this.apiAccessCache = false;
       return false;
     }
   }
@@ -184,6 +209,7 @@ export class ExportCommentsClient {
           return { ok: true, data: { guid: data['guid'] as string, status: 'queueing' } as JobResponse };
         }
         if (res.ok && data) return { ok: true, data: data as unknown as JobResponse };
+        if (res.status === 401) return unauthorizedOutput();
         return {
           ok: false,
           error: (data?.['error'] as string | undefined) ?? `HTTP ${res.status}`,
@@ -374,6 +400,7 @@ export class ExportCommentsClient {
       const res = await fetch(url, { headers: this.headers });
       const text = await res.text();
       if (!res.ok) {
+        if (res.status === 401) return unauthorizedOutput();
         let parsed: Record<string, unknown> | null = null;
         try { parsed = JSON.parse(text); } catch { /* error bodies are JSON; ignore parse failures */ }
         const fileUrl = (parsed?.['download_url'] as string | undefined) ?? (parsed?.['json_url'] as string | undefined);

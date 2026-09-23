@@ -3,31 +3,36 @@
 // ── ExportComments MCP Server (HTTP / SSE) ──
 // Stateless MCP server that authenticates each request via Bearer (OAuth
 // access token or legacy X-AUTH-TOKEN). Deployed at mcp.exportcomments.com
-// for remote MCP clients (Claude web, Cursor, etc.).
+// for remote MCP clients (ChatGPT, Claude web, Cursor, etc.).
 //
 // Auth:
 //   • Authorization: Bearer <jwt>                (preferred — OAuth 2.0 token)
 //   • Authorization: Bearer <api-token>          (legacy API token works too)
 //   • X-AUTH-TOKEN: <api-token>                  (legacy header for direct API parity)
 //
-// On missing/invalid auth, returns 401 with WWW-Authenticate pointing at
-// our OAuth discovery doc so MCP clients can launch the OAuth flow.
+// On missing, expired, malformed or revoked auth we answer HTTP 401 with a
+// WWW-Authenticate challenge pointing at our OAuth discovery docs. That header
+// is the ONLY signal an MCP client acts on to re-run the OAuth flow — a failing
+// tool result inside an HTTP 200 tells it nothing, which is why a token that
+// aged out used to leave the connector permanently broken.
 //
-// The MCP server itself does NOT verify the JWT signature locally — the
-// downstream API (/api/v3/*) validates on every call. A bogus token will
-// receive 401 from the API on the first tool invocation. This is acceptable
-// for Phase 2; Phase 3 may add local JWT verification for faster rejection.
+// Token checking is layered so the fast path stays free:
+//   1. every request — offline `exp` check on the JWT (no network)
+//   2. `initialize` only — one liveness probe against the API, so a revoked
+//      but unexpired token is caught at connect time rather than mid-export
+//   3. the API still validates the signature on every downstream call
 
 import * as http from 'node:http';
-import { randomUUID } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerExportTools } from './mcp-tools.js';
+import { inspectToken, probeTokenLiveness } from './auth.js';
 
 const PORT = Number(process.env.MCP_PORT ?? 3100);
 const HOST = process.env.MCP_HOST ?? '127.0.0.1';
 const OAUTH_DISCOVERY_URL = process.env.OAUTH_DISCOVERY_URL
   ?? 'https://exportcomments.com/.well-known/oauth-authorization-server';
+const PROTECTED_RESOURCE_URL = 'https://mcp.exportcomments.com/.well-known/oauth-protected-resource';
 
 function extractToken(req: http.IncomingMessage): string | null {
   const authHeader = req.headers.authorization;
@@ -42,25 +47,37 @@ function extractToken(req: http.IncomingMessage): string | null {
   return null;
 }
 
-function sendUnauthorized(res: http.ServerResponse): void {
-  // Per MCP spec (and RFC 9728), surfacing `resource_metadata` pointing at
-  // *our own* /.well-known/oauth-protected-resource lets compatible clients
-  // (Claude Custom Connector, Cursor, Windsurf) auto-discover the
-  // authorization server and complete the OAuth flow without manual setup.
-  // `as_uri` is the older shorthand; both are emitted for compatibility.
-  const protectedResourceUrl = 'https://mcp.exportcomments.com/.well-known/oauth-protected-resource';
+/**
+ * RFC 6750 §3 / RFC 9728 challenge. `error="invalid_token"` is what tells a
+ * client the credential it holds is dead and must be replaced — omit it and
+ * ChatGPT treats the 401 as "not logged in yet" at best, or as a hard failure.
+ * `resource_metadata` lets compatible clients (ChatGPT connectors, Claude
+ * Custom Connector, Cursor, Windsurf) auto-discover the authorization server;
+ * `as_uri` is the older shorthand, emitted alongside for compatibility.
+ */
+function sendUnauthorized(
+  res: http.ServerResponse,
+  opts: { error?: 'invalid_token'; description: string } = { description: 'Missing or invalid Bearer token.' },
+): void {
+  const parts = ['Bearer realm="exportcomments"'];
+  if (opts.error) parts.push(`error="${opts.error}"`);
+  parts.push(`error_description="${opts.description.replace(/"/g, "'")}"`);
+  parts.push(`as_uri="${OAUTH_DISCOVERY_URL}"`);
+  parts.push(`resource_metadata="${PROTECTED_RESOURCE_URL}"`);
+
   res.writeHead(401, {
     'Content-Type': 'application/json',
-    'WWW-Authenticate': `Bearer realm="exportcomments", as_uri="${OAUTH_DISCOVERY_URL}", resource_metadata="${protectedResourceUrl}"`,
+    'WWW-Authenticate': parts.join(', '),
   });
   res.end(JSON.stringify({
     jsonrpc: '2.0',
     error: {
       code: -32001,
-      message: 'Unauthorized: missing or invalid Bearer token.',
+      message: `Unauthorized: ${opts.description}`,
       data: {
         oauth_authorization_server: OAUTH_DISCOVERY_URL,
-        help: 'Connect via OAuth at https://exportcomments.com/oauth/authorize, or pass an API token from https://app.exportcomments.com/user/api',
+        resource_metadata: PROTECTED_RESOURCE_URL,
+        help: 'Reconnect the ExportComments connector to re-authorize, or pass an API token from https://app.exportcomments.com/user/api',
       },
     },
     id: null,
@@ -84,10 +101,58 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
+/** True when the JSON-RPC body (single message or batch) carries an `initialize`. */
+function isInitializeRequest(body: unknown): boolean {
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.some((m) =>
+    m !== null && typeof m === 'object' && (m as Record<string, unknown>)['method'] === 'initialize');
+}
+
 async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const token = extractToken(req);
   if (!token) {
     sendUnauthorized(res);
+    return;
+  }
+
+  // ── Layer 1: offline expiry check (the failure this whole gate exists for) ──
+  const state = inspectToken(token);
+  if (state.kind === 'expired') {
+    sendUnauthorized(res, {
+      error: 'invalid_token',
+      description: 'The access token expired. Re-authorize to obtain a new one.',
+    });
+    return;
+  }
+  if (state.kind === 'malformed') {
+    sendUnauthorized(res, {
+      error: 'invalid_token',
+      description: 'The access token could not be parsed.',
+    });
+    return;
+  }
+
+  let body: unknown;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Parse error', data: String(err) },
+      id: null,
+    }));
+    return;
+  }
+
+  // ── Layer 2: one liveness probe per session, at connect time ──
+  // Catches unexpired-but-revoked tokens while the client is still in a state
+  // where it will happily re-run OAuth. Costs one request per connector start.
+  if (isInitializeRequest(body) && await probeTokenLiveness(token) === 'unauthorized') {
+    sendUnauthorized(res, {
+      error: 'invalid_token',
+      description: 'The access token is no longer valid. Re-authorize to reconnect.',
+    });
     return;
   }
 
@@ -109,7 +174,6 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
   });
 
   try {
-    const body = await readBody(req);
     await transport.handleRequest(req, res, body);
   } catch (err) {
     if (!res.headersSent) {
@@ -124,7 +188,7 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
 }
 
 const server = http.createServer(async (req, res) => {
-  // CORS (allow Claude web + arbitrary MCP clients)
+  // CORS (allow ChatGPT + Claude web + arbitrary MCP clients)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id, mcp-protocol-version');
@@ -146,6 +210,12 @@ const server = http.createServer(async (req, res) => {
   // clients can complete the connector setup without an extra lookup).
   // We mirror the AS metadata locally and also expose Protected Resource
   // Metadata (RFC 9728) for clients that follow the newer MCP auth spec.
+  //
+  // Keep this mirror in sync with the authoritative document served by the
+  // api repo (src/Controller/OAuth/OAuthMetadataController.php) — a client
+  // that reads `grant_types_supported` from here and finds no `refresh_token`
+  // will never try to refresh, which is exactly how connectors used to die
+  // an hour after being added.
   if (req.method === 'GET' && req.url === '/.well-known/oauth-authorization-server') {
     const issuer = new URL(OAUTH_DISCOVERY_URL).origin;
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -154,11 +224,13 @@ const server = http.createServer(async (req, res) => {
       authorization_endpoint: `${issuer}/oauth/authorize`,
       token_endpoint: `${issuer}/oauth/token`,
       registration_endpoint: `${issuer}/oauth/register`,
+      revocation_endpoint: `${issuer}/oauth/revoke`,
       scopes_supported: ['read', 'write'],
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none'],
+      revocation_endpoint_auth_methods_supported: ['none'],
       service_documentation: 'https://docs.exportcomments.com/cli/mcp',
     }));
     return;
@@ -166,7 +238,7 @@ const server = http.createServer(async (req, res) => {
 
   // RFC 9728 §3.1 — metadata is served at the resource's well-known URL
   // suffix. Most clients fetch /.well-known/oauth-protected-resource at the
-  // origin; Claude.ai's Custom Connector appends the resource path, so we
+  // origin; ChatGPT and Claude.ai's connectors append the resource path, so we
   // accept both /.well-known/oauth-protected-resource and
   // /.well-known/oauth-protected-resource/mcp (and any other path under it)
   // with the same document.
