@@ -25,7 +25,7 @@
 import * as http from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { registerExportTools } from './mcp-tools.js';
+import { registerAllMcp } from './mcp-tools.js';
 import { inspectToken, probeTokenLiveness } from './auth.js';
 
 const PORT = Number(process.env.MCP_PORT ?? 3100);
@@ -160,7 +160,7 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
   // returns undefined). The token closes over the tool handlers via
   // `getToken`. The handlers exec for at most this request's lifetime.
   const server = new McpServer({ name: 'exportcomments', version: '1.0.0' });
-  registerExportTools(server, () => token);
+  registerAllMcp(server, () => token);
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless

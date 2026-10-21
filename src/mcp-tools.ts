@@ -2,27 +2,42 @@
 //
 // The stdio entry point reads the API token once from process.env at boot;
 // the HTTP entry point pulls a fresh token from the incoming Authorization
-// header on every request. Both call `registerExportTools(server, getToken)`
+// header on every request. Both call `registerAllMcp(server, getToken)`
 // where `getToken()` is invoked LAZILY inside each tool handler, so the
 // HTTP variant can return a per-request value without rewriting handlers.
+//
+// Tool groups live in their own modules:
+//   mcp-tools.ts            core: exports, download, platforms, account basics,
+//                           giveaway draw, webhooks, schedules
+//   mcp-tools-insights.ts   server-side stats/search/sample/sentiment/compare/
+//                           diagnostics, retry/stop, analytics report
+//   mcp-tools-workflows.ts  bulk exports + multi-step workflows
+//   mcp-tools-account.ts    usage history, invoices, extra capacity, notifications,
+//                           giveaway publishing
+//   mcp-resources.ts        exportcomments:// resources
+//   mcp-prompts.ts          guided prompts (slash commands in clients)
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { ExportCommentsClient } from './client.js';
 import { PLATFORMS, detectPlatform } from './platforms.js';
 import { waitForJobRealtime } from './realtime.js';
+import { jsonResult, clientFor, type TokenProvider } from './mcp-shared.js';
+import { registerInsightTools } from './mcp-tools-insights.js';
+import { registerWorkflowTools } from './mcp-tools-workflows.js';
+import { registerAccountTools } from './mcp-tools-account.js';
+import { registerResources } from './mcp-resources.js';
+import { registerPrompts } from './mcp-prompts.js';
 
-export type TokenProvider = () => string;
+export type { TokenProvider } from './mcp-shared.js';
 
-function clientFor(getToken: TokenProvider): ExportCommentsClient {
-  const token = getToken();
-  if (!token) {
-    throw new Error(
-      'Missing API token. Stdio mode requires EXPORTCOMMENTS_API_TOKEN; HTTP mode requires Authorization: Bearer <token>. ' +
-      'Get a token at https://app.exportcomments.com/user/api or via the OAuth flow at https://exportcomments.com/oauth/authorize.'
-    );
-  }
-  return new ExportCommentsClient(token);
+/** Everything the server exposes: tools, resources and prompts. */
+export function registerAllMcp(server: McpServer, getToken: TokenProvider): void {
+  registerExportTools(server, getToken);
+  registerInsightTools(server, getToken);
+  registerWorkflowTools(server, getToken);
+  registerAccountTools(server, getToken);
+  registerResources(server, getToken);
+  registerPrompts(server);
 }
 
 export function registerExportTools(server: McpServer, getToken: TokenProvider): void {
@@ -262,97 +277,26 @@ Use this before export_comments to understand what options are available.`,
 
   server.tool(
     'pick_random_winners',
-    `Pick N random winners from a completed export. Downloads the export's
-JSON payload, deduplicates by commenter username, optionally filters by
-@-mention, hashtag, or substring, then picks N winners uniformly.
-
-Returns the winner list with usernames, comment text, and permalinks
-(suitable for FTC-compliant public verification).`,
+    `Pick N random winners from a completed export. The draw runs on the server (works for any
+export size and every plan tier): entries are filtered by @-mention, #hashtag, substring,
+excluded usernames and minimum likes, de-duplicated by commenter, ordered deterministically and
+shuffled with a seed. The response carries the seed and a verification hash — re-running with the
+same guid, filters and seed reproduces the same winners, which is what makes the result auditable.
+Pass seed yourself to re-run a previous draw; omit it for a fresh one. Winners include username,
+comment, permalink and profile_url. Use publish_giveaway_result to get a public verification page.`,
     {
       guid: z.string().describe('Completed export GUID (status=done)'),
-      count: z.number().min(1).max(100).default(1).describe('Number of winners (default 1)'),
+      count: z.number().int().min(1).max(100).default(1).describe('Number of winners (default 1)'),
       require_mention: z.string().optional().describe('Only consider comments containing this @-handle (e.g. "@brand")'),
       require_hashtag: z.string().optional().describe('Only consider comments containing this #hashtag'),
       require_text: z.string().optional().describe('Substring the comment must contain (case-insensitive)'),
+      exclude_users: z.array(z.string()).optional().describe('Usernames that can never win (brand account, staff)'),
+      min_likes: z.number().int().optional().describe('Minimum likes on the comment'),
       dedupe_by_user: z.boolean().optional().default(true).describe('Limit each commenter to one entry (default true)'),
+      exclude_empty: z.boolean().optional().default(true).describe('Skip comments with no text (default true)'),
+      seed: z.number().int().optional().describe('Seed to reproduce an earlier draw'),
     },
-    async (params) => {
-      const client = clientFor(getToken);
-      const dl = await client.downloadJson(params.guid);
-      if (!dl.ok) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify(dl, null, 2) }], isError: true };
-      }
-
-      // Most ExportComments JSON exports are an array of comment objects;
-      // some platforms wrap in {comments: [...]}. Tolerate both.
-      const raw = dl.data as unknown;
-      let comments: Array<Record<string, unknown>> =
-        Array.isArray(raw) ? raw as Array<Record<string, unknown>>
-        : (raw && typeof raw === 'object' && Array.isArray((raw as Record<string, unknown>).comments))
-          ? (raw as { comments: Array<Record<string, unknown>> }).comments
-          : [];
-
-      const totalIn = comments.length;
-
-      if (params.require_mention) {
-        const needle = params.require_mention.toLowerCase();
-        comments = comments.filter((c) => String(c.comment ?? c.text ?? '').toLowerCase().includes(needle));
-      }
-      if (params.require_hashtag) {
-        const tag = params.require_hashtag.startsWith('#') ? params.require_hashtag : '#' + params.require_hashtag;
-        const needle = tag.toLowerCase();
-        comments = comments.filter((c) => String(c.comment ?? c.text ?? '').toLowerCase().includes(needle));
-      }
-      if (params.require_text) {
-        const needle = params.require_text.toLowerCase();
-        comments = comments.filter((c) => String(c.comment ?? c.text ?? '').toLowerCase().includes(needle));
-      }
-      if (params.dedupe_by_user !== false) {
-        const seen = new Set<string>();
-        comments = comments.filter((c) => {
-          const u = String(c.username ?? c.user ?? c.user_name ?? '');
-          if (u === '' || seen.has(u)) return false;
-          seen.add(u);
-          return true;
-        });
-      }
-
-      if (comments.length === 0) {
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({
-            ok: false,
-            error: 'No comments matched the filters.',
-            total_in_export: totalIn,
-          }, null, 2) }],
-          isError: true,
-        };
-      }
-
-      // Fisher-Yates shuffle then take first N
-      const pool = [...comments];
-      for (let i = pool.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [pool[i], pool[j]] = [pool[j]!, pool[i]!];
-      }
-      const winners = pool.slice(0, Math.min(params.count, pool.length));
-
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({
-          ok: true,
-          data: {
-            total_in_export: totalIn,
-            after_filters: comments.length,
-            winners_requested: params.count,
-            winners: winners.map((c) => ({
-              username: c.username ?? c.user ?? c.user_name,
-              comment: c.comment ?? c.text,
-              permalink: c.permalink ?? c.url ?? null,
-              created_at: c.created_at ?? c.timestamp ?? null,
-            })),
-          },
-        }, null, 2) }],
-      };
-    }
+    async ({ guid, ...opts }) => jsonResult(await clientFor(getToken).drawWinners(guid, opts)),
   );
 
   // ── Webhooks ──

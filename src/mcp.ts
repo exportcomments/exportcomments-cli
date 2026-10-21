@@ -9,11 +9,11 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { registerExportTools } from './mcp-tools.js';
+import { registerAllMcp } from './mcp-tools.js';
 
 const server = new McpServer({ name: 'exportcomments', version: '1.0.0' });
 
-registerExportTools(server, () => process.env.EXPORTCOMMENTS_API_TOKEN ?? '');
+registerAllMcp(server, () => process.env.EXPORTCOMMENTS_API_TOKEN ?? '');
 
 async function main() {
   const transport = new StdioServerTransport();

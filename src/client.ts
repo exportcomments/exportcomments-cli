@@ -528,6 +528,169 @@ export class ExportCommentsClient {
     return this.v1Request('POST', `/schedules/${uuid}/resume`);
   }
 
+  // ───────────────────────────────────────────────────────────────────────
+  // /api/v3/job/{guid}/* — server-side insights (all tiers)
+  //
+  // These never ship the dataset: the API reduces it to aggregates, a page,
+  // a sample, a draw or a diff, so a 50k-comment export costs the model a
+  // few KB. Each call is one tick of the per-tier daily analysis limit.
+  // ───────────────────────────────────────────────────────────────────────
+
+  private query(params: Record<string, unknown>): string {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null || v === '') continue;
+      q.set(k, Array.isArray(v) ? v.join(',') : String(v));
+    }
+    const str = q.toString();
+    return str ? `?${str}` : '';
+  }
+
+  /** Aggregates: per-day, top authors/hashtags/mentions/words, likes, length, sentiment, ratings. */
+  async getExportStats(guid: string): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/stats`);
+  }
+
+  /** Filtered + paginated rows. */
+  async searchExport(guid: string, criteria: {
+    q?: string; regex?: string; username?: string; min_likes?: number;
+    date_from?: string; date_to?: string; sentiment?: string;
+    min_rating?: number; max_rating?: number; has_link?: boolean; is_question?: boolean;
+    sort?: string; page?: number; per_page?: number;
+  }): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/search${this.query(criteria)}`);
+  }
+
+  /** N rows by strategy: random (seedable), top_likes, latest, oldest, longest. */
+  async sampleExport(guid: string, n: number, strategy?: string, seed?: number): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/sample${this.query({ n, strategy, seed })}`);
+  }
+
+  /** Seeded, reproducible giveaway draw. */
+  async drawWinners(guid: string, opts: {
+    count?: number; require_mention?: string; require_hashtag?: string; require_text?: string;
+    exclude_users?: string[]; min_likes?: number; dedupe_by_user?: boolean; exclude_empty?: boolean; seed?: number;
+  }): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/winners${this.query(opts)}`);
+  }
+
+  /** Diff two finished exports of the same account. */
+  async compareExports(guid: string, withGuid: string, sample?: number): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/compare${this.query({ with: withGuid, sample })}`);
+  }
+
+  /** Sentiment distribution over a bounded subset (synchronous; keep limit small). */
+  async getExportSentiment(guid: string, opts: { limit?: number; strategy?: string; seed?: number; examples?: number }): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/sentiment${this.query(opts)}`);
+  }
+
+  /** Status, customer-safe error, warnings, cap detection, next-step hint. */
+  async getExportDiagnostics(guid: string): Promise<CLIOutput<unknown>> {
+    return this.request('GET', `/job/${guid}/diagnostics`);
+  }
+
+  /** Retry a failed export. */
+  async retryJob(guid: string): Promise<CLIOutput<unknown>> {
+    if (!(await this.hasApiAccess())) {
+      return this.v1Request('POST', `/jobs/${guid}/retry`);
+    }
+    return this.request('PATCH', `/job/${guid}/retry`);
+  }
+
+  /** Existing dashboard analytics report (heatmaps, engagement) for platforms that support it. */
+  async getExportAnalyticsReport(guid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/jobs/${guid}/analytics`, {});
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Bulk
+  // ───────────────────────────────────────────────────────────────────────
+
+  async createBatchExport(urls: string[], options?: Record<string, unknown>): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', '/batch-export', { urls, options: options ?? {} });
+  }
+
+  async getBatchExport(batchId: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', `/batch-export/${batchId}`);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Workflows (multi-step pipelines, Premium/Business)
+  // ───────────────────────────────────────────────────────────────────────
+
+  async listWorkflows(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/workflows');
+  }
+
+  async getWorkflow(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', `/workflows/${uuid}`);
+  }
+
+  async getWorkflowPipelineInfo(url: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', `/workflows/pipeline-info${this.query({ url })}`);
+  }
+
+  async createWorkflow(payload: Record<string, unknown>): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', '/workflows', payload);
+  }
+
+  async updateWorkflow(uuid: string, payload: Record<string, unknown>): Promise<CLIOutput<unknown>> {
+    return this.v1Request('PUT', `/workflows/${uuid}`, payload);
+  }
+
+  async deleteWorkflow(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('DELETE', `/workflows/${uuid}`);
+  }
+
+  async pauseWorkflow(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/workflows/${uuid}/pause`);
+  }
+
+  async resumeWorkflow(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/workflows/${uuid}/resume`);
+  }
+
+  async runWorkflow(uuid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/workflows/${uuid}/run-now`);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Account, billing, notifications, giveaway publishing
+  // ───────────────────────────────────────────────────────────────────────
+
+  async getUsageStats(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/user/usage/stats');
+  }
+
+  async getAnalyticsSummary(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/user/analytics/summary');
+  }
+
+  async listInvoices(): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', '/invoices');
+  }
+
+  /** Returns a Stripe checkout link for N extra 250k-comment capacity packs; never charges by itself. */
+  async getExtraCapacityCheckout(packs: number, guid?: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', `/payment/create/extra-packs${this.query({ packs, guid })}`);
+  }
+
+  async getExportNotification(guid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('GET', `/jobs/${guid}/notification`);
+  }
+
+  async toggleExportNotification(guid: string): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/jobs/${guid}/toggleNotification`);
+  }
+
+  /** Publish a giveaway result to a public verification page; returns shareUrl. */
+  async publishGiveawayResult(guid: string, payload: {
+    winner: { username?: string; index?: number; message?: string; profileUrl?: string; profileImage?: string };
+    filteredCount?: number; filters?: Record<string, unknown>; timestamp?: string;
+  }): Promise<CLIOutput<unknown>> {
+    return this.v1Request('POST', `/jobs/${guid}/draw/share`, payload);
+  }
+
   /** Ping the API to check connectivity */
   async ping(): Promise<CLIOutput<{ status: string }>> {
     // Ping uses v1 endpoint
